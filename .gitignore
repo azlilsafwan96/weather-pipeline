@@ -1,2 +1,3 @@
 /data
 .env
+postgres_data
