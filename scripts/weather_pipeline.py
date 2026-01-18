@@ -52,7 +52,7 @@ def init_db():
                     humidity_pct FLOAT,
                     recorded_at TIMESTAMP,
                     processed_at TIMESTAMP,
-                    CONSTRAINT uq_city_recorded_at UNIQUE (city, recorded_at)
+                    CONSTRAINT city_recorded_at_unique UNIQUE (city, recorded_at)
                 );
             """))
         logging.info("Database schema initialized.")
