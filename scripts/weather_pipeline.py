@@ -2,6 +2,7 @@ import datetime
 import json
 import logging
 import os
+from functools import lru_cache
 from typing import Any, Dict, Optional
 from urllib.parse import quote_plus
 
@@ -24,13 +25,47 @@ def initialize_directory():
         ]
     )
 
+@lru_cache(maxsize=None)
+def get_db_engine():
+    user = os.getenv("DB_USER", "")
+    pw = os.getenv("DB_PASSWORD", "")
+    host = os.getenv("DB_HOST")
+    port = os.getenv("DB_PORT")
+    db = os.getenv("DB_NAME")
+    
+    # URL encode credentials to handle special characters safely
+    encoded_user = quote_plus(user)
+    encoded_pw = quote_plus(pw)
+    
+    return create_engine(f'postgresql://{encoded_user}:{encoded_pw}@{host}:{port}/{db}')
+
+def init_db():
+    """Initializes the database schema if it does not exist."""
+    try:
+        engine = get_db_engine()
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS weather_data (
+                    id SERIAL PRIMARY KEY,
+                    city VARCHAR(255),
+                    temp_celsius FLOAT,
+                    humidity_pct FLOAT,
+                    recorded_at TIMESTAMP,
+                    processed_at TIMESTAMP,
+                    CONSTRAINT uq_city_recorded_at UNIQUE (city, recorded_at)
+                );
+            """))
+        logging.info("Database schema initialized.")
+    except Exception as e:
+        logging.error(f"Error initializing database schema: {e}")
+
 def fetch_data(city: str) -> Optional[Dict[str, Any]]:
     API_KEY=os.getenv('OPENWEATHERMAP_API_KEY')
     if not API_KEY:
         logging.error("API Key not found in environment variables.")
         return None
 
-    URL = "http://api.openweathermap.org/data/2.5/weather"
+    URL = "https://api.openweathermap.org/data/2.5/weather"
     params = {
         "q": city,
         "appid": API_KEY,
@@ -41,7 +76,7 @@ def fetch_data(city: str) -> Optional[Dict[str, Any]]:
         response = requests.get(URL, params=params, timeout=10)
         response.raise_for_status()
         raw_data = response.json()
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
         filename = f"data/raw/weather_{city}_{timestamp}.json"
 
         # store raw data into json file
@@ -69,7 +104,7 @@ def filter_data(raw_data: Optional[Dict[str, Any]]) -> Optional[pd.DataFrame]:
         }
         df = df[cols.keys()].rename(columns=cols)
         df["recorded_at"] = pd.to_datetime(df["timestamp_unix"], unit="s")
-        df["processed_at"] = pd.Timestamp.now()
+        df["processed_at"] = pd.Timestamp.now(datetime.timezone.utc).replace(tzinfo=None)
         df = df.drop(columns=["timestamp_unix"])
         return df
     except Exception as e:
@@ -81,19 +116,9 @@ def store_to_db(df: Optional[pd.DataFrame]):
         logging.warning("No DataFrame to store in database.")
         return
 
-    user = os.getenv("DB_USER", "")
-    pw = os.getenv("DB_PASSWORD", "")
-    host = os.getenv("DB_HOST")
-    port = os.getenv("DB_PORT")
-    db = os.getenv("DB_NAME")
+    engine = get_db_engine()
 
-    # URL encode credentials to handle special characters safely
-    encoded_user = quote_plus(user)
-    encoded_pw = quote_plus(pw)
-
-    engine = create_engine(f'postgresql://{encoded_user}:{encoded_pw}@{host}:{port}/{db}')
-
-    df.to_sql('temp_weather', engine, if_exists='append', index=False)
+    df.to_sql('temp_weather', engine, if_exists='replace', index=False)
 
     query = text(
         """
@@ -111,6 +136,7 @@ def store_to_db(df: Optional[pd.DataFrame]):
 
 if __name__ == "__main__":
     initialize_directory()
+    init_db()
     raw_data = fetch_data('Kuala Lumpur')
     df = filter_data(raw_data)
     store_to_db(df)
